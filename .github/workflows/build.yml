@@ -1,0 +1,95 @@
+name: PASC OS Cloud Build
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build bootable PASC prototype
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            live-build \
+            debootstrap \
+            squashfs-tools \
+            xorriso \
+            grub-pc-bin \
+            grub-efi-amd64-bin \
+            mtools \
+            dosfstools \
+            isolinux \
+            syslinux-common
+
+      - name: Configure live operating system
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          BUILD_DIR="$RUNNER_TEMP/pasc-build"
+          sudo mkdir -p "$BUILD_DIR"
+          sudo chown "$USER":"$(id -gn)" "$BUILD_DIR"
+          cd "$BUILD_DIR"
+
+          sudo lb config \
+            --distribution bookworm \
+            --architectures amd64 \
+            --binary-images iso-hybrid \
+            --archive-areas "main contrib non-free non-free-firmware" \
+            --bootappend-live "boot=live components username=pasc hostname=pasc-os"
+
+          sudo mkdir -p config/package-lists
+
+          sudo tee config/package-lists/pasc.list.chroot > /dev/null <<'PACKAGES'
+          live-boot
+          live-config
+          live-config-systemd
+          task-xfce-desktop
+          network-manager
+          sudo
+          ca-certificates
+          curl
+          git
+          python3
+          python3-pip
+          build-essential
+          PACKAGES
+
+      - name: Build bootable ISO
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cd "$RUNNER_TEMP/pasc-build"
+          sudo env DEBIAN_FRONTEND=noninteractive lb build
+
+          ISO="$(find . -maxdepth 1 -type f -name '*.iso' -print -quit)"
+          if [ -z "$ISO" ]; then
+            echo "ERROR: No ISO was generated."
+            exit 1
+          fi
+
+          sudo chmod a+r "$ISO"
+          ls -lh "$ISO"
+          echo "ISO_PATH=$RUNNER_TEMP/pasc-build/${ISO#./}" >> "$GITHUB_ENV"
+
+      - name: Upload ISO artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pasc-os-prototype-iso
+          path: ${{ env.ISO_PATH }}
+          if-no-files-found: error
+          retention-days: 7
